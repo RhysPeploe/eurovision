@@ -10,8 +10,33 @@ library(e1071)
 library(worlddatr)
 library(stringr)
 library(ggflags)
+library(randomForest)
 
-eurovision_data = read_csv("../data/eurovision.csv", show_col_types = FALSE)
+eurovision_data = read_csv("../data/eurovision.csv", show_col_types = FALSE) |> 
+  mutate(year = as.integer(year),
+         final_place = as.integer(final_place),
+         final_points = as.integer(final_points),
+         top_5 = factor(top_5),
+         top_10 = factor(top_10),
+         final_running_order = as.integer(final_running_order), 
+         final_ind = factor(final_ind),
+         big_6_ind = factor(big_6_ind),
+         semi_num = factor(semi_num),
+         semi_place = as.integer(semi_place),
+         semi_points = as.integer(semi_points),
+         semi_running_order = as.integer(semi_running_order),
+         national_final = factor(national_final),
+         solo_artist = factor(solo_artist),
+         returning_artist = factor(returning_artist),
+         artists = as.integer(artists),
+         multiple_languages = factor(multiple_languages),
+         eu = factor(eu),
+         nato = factor(nato),
+         my_esb_community = as.integer(my_esb_community),
+         my_esb_personal = as.integer(my_esb_personal),
+         ogae_points = as.integer(ogae_points),
+         marcel_bezencon_awards = as.integer(marcel_bezencon_awards))
+
 
 ui <- navbarPage(
   "Eurovision Data 2016-26",
@@ -61,11 +86,14 @@ ui <- navbarPage(
                  tabsetPanel(
                    id = "qualifer_algorithm",
                    type = "hidden",
-                   tabPanelBody("Random Forest", "rf xxxx"),
+                   tabPanelBody("Random Forest", 
+                      plotOutput("feature_imp"),
+                      tableOutput("confusion_rf"),
+                      tableOutput("rf_pred")),
                    tabPanelBody("SVM", 
                       # tableOutput("svm_conf_matrix")
-                      plotOutput("svm_predict"),
-                      plotOutput("svm_training")
+                      plotOutput("svm_pred_plot"),
+                      plotOutput("svm_train_plot")
                                 )
                       )
                    ) 
@@ -229,7 +257,7 @@ server <- function(input, output, session) {
   )
   y_grid = reactive(predict(classifier(), newdata = grid_set()))
   
-  output$svm_training = renderPlot({
+  output$svm_train_plot = renderPlot({
     plot = ggplot() +
       geom_tile(data = grid_set(), aes(x = my_esb_community, y = qualification_record_before, fill = as.factor(y_grid())), alpha = 0.3) +
       geom_point(data = training_set(), aes(x = my_esb_community, y = qualification_record_before, color = as.factor(final_ind)), size = 3, shape = 21) +
@@ -244,7 +272,7 @@ server <- function(input, output, session) {
     plot
     })
   
-  output$svm_predict = renderPlot({
+  output$svm_pred_plot = renderPlot({
     pred_data = reactive(svm_predict() %>%
       left_join(world_income %>% select(country, alpha_2_code), by = c("country")) %>% 
       mutate(alpha_2_code = case_when(
@@ -271,6 +299,75 @@ server <- function(input, output, session) {
            fill = "Predicted Result", colour = "Semi Final Number") +
       theme_minimal()
   })
+  
+  rf_data = reactive(eurovision() |>
+                        select(-c(starts_with("language"), genre,
+                                  semi_odds, final_odds_post_semi, final_place, final_points, top_5, top_10,
+                                  final_running_order), multiple_languages) |>
+                        mutate(
+                          country_group = factor(country_group,
+                                                 levels = c("Central", "Northern", "Eastern",
+                                                            "Southern", "South-Eastern", "Western"),
+                                                 labels = c(1, 2, 3, 4, 5, 6)),
+                          # my_esb_community = scale(my_esb_community),
+                          ogae_points = scale(ogae_points),
+                          # qualification_record = scale(qualification_record),
+                          semi_running_order = scale(semi_running_order),
+                          artists = scale(artists),
+                          national_language = as.numeric(factor(national_language)) - 1,
+                          # multiple_language = scale(multiple_language)
+                        ) %>%
+                        filter(big_6_ind != 1 | is.na(big_6_ind),
+                               !is.na(year)) %>%
+                        select(-big_6_ind) )
+  
+  rf_predict = reactive(rf_data() |> filter(year == input$qualifer_year))
+  rf_load = reactive(rf_data() |> filter(year < input$qualifer_year))
+  
+  rf_mod <- reactive(randomForest(
+    as.factor(final_ind) ~ semi_running_order + semi_num + national_final + 
+      solo_artist + sex + returning_artist + multiple_languages +  
+      national_language + my_esb_community + my_esb_personal + ogae_points +
+      eu + nato + country_group + qualification_record_before, 
+    data = rf_load(), proximity = TRUE, na.action = na.omit, type = "classification",
+    replace = TRUE))
+  
+  output$feature_imp = renderPlot({
+    varImpPlot(rf_mod())
+  })
+  
+  output$confusion_rf = renderTable({
+    rf_mod()$confusion
+  })
+  
+  # pred_train = reactive(rf_predict() %>%
+  #   na.omit() %>%
+  #   bind_cols(rf_mod()$votes, predicted = rf_mod()$predicted) %>%
+  #   select(country, year, semi_num, final_ind, `0`, `1`, predicted))
+  # 
+  # output$pred_data = renderTable({
+  #   pred_train()
+  # })
+
+  # output$confusion_rf = renderTable({
+  #   confusionMatrix(pred_train()$predicted,
+  #                   reference = as.factor(pred_train()$final_ind),
+  #                   positive = "1")$table
+  # })
+  
+  output$rf_pred = renderTable({
+    cbind(
+      rf_predict() %>% 
+        select(-final_ind)  %>% 
+        select(country, semi_num),
+      predict(rf_mod(), newdata = rf_predict(),
+              type = "vote")) %>%
+      arrange(semi_num, desc(`1`)) |> 
+      group_by(semi_num) |> 
+      mutate(class_pred = as.integer(c(rep(1, 10), rep(0, (n() - 10)))))
+  })
+
+  
 }
 
 shinyApp(ui, server)
